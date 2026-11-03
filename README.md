@@ -58,7 +58,7 @@ velx/
 
 ### 1. Clone Repository
 ```bash
-git clone https://github.com/USERNAME/velx.git
+git clone https://github.com/yudhayasa07-FutureEng/velx.git
 cd velx
 ```
 
@@ -119,4 +119,4 @@ Buka [http://localhost:3000](http://localhost:3000) di browser Anda.
 
 ---
 
-*Dibuat dengan sepenuh hati sebagai proyek portofolio teknologi mutakhir.*
+*Dibuat dengan sepenuh hati oleh [yudhayasa07-FutureEng](https://github.com/yudhayasa07-FutureEng) sebagai proyek portofolio teknologi mutakhir.*
