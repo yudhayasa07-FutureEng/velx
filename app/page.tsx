@@ -1,7 +1,8 @@
 "use client";
 
 import { FormEvent, useEffect, useMemo, useState } from "react";
-import { getBrowserClient } from "@/lib/supabase/client";
+import { getOptionalClient } from "@/lib/supabase/client";
+import type { User } from "@supabase/supabase-js";
 
 type Priority = "Tinggi" | "Sedang" | "Rendah";
 
@@ -20,97 +21,124 @@ type ChatMessage = {
   time: string;
 };
 
-type AppUser = {
-  email: string;
-  id?: string;
-};
+// ─────────────────────────────────────────────────────────────────────────────
+// Helper: map DB priority string → UI priority label
+// ─────────────────────────────────────────────────────────────────────────────
+function toPriority(raw: string): Priority {
+  if (raw === "High" || raw === "Tinggi") return "Tinggi";
+  if (raw === "Low" || raw === "Rendah") return "Rendah";
+  return "Sedang";
+}
+function toDbPriority(p: Priority): string {
+  if (p === "Tinggi") return "High";
+  if (p === "Rendah") return "Low";
+  return "Medium";
+}
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Main Component
+// ─────────────────────────────────────────────────────────────────────────────
 export default function Home() {
-  // App views: "landing" -> "auth" -> "workspace"
+  // App views: landing → auth → workspace
   const [view, setView] = useState<"landing" | "auth" | "workspace">("landing");
   const [authMode, setAuthMode] = useState<"login" | "register">("login");
   const [activeTab, setActiveTab] = useState<"tasks" | "ai">("tasks");
 
-  // User Auth State
-  const [user, setUser] = useState<AppUser | null>(null);
+  // Supabase Auth state
+  const [user, setUser] = useState<User | null>(null);
   const [emailInput, setEmailInput] = useState("");
   const [passwordInput, setPasswordInput] = useState("");
   const [authLoading, setAuthLoading] = useState(false);
   const [authError, setAuthError] = useState("");
-  const [authSuccess, setAuthSuccess] = useState("");
 
-  // Tasks & Chat State
+  // Task state
   const [tasks, setTasks] = useState<Task[]>([]);
   const [taskFilter, setTaskFilter] = useState<"all" | "active" | "completed">("all");
   const [newTaskTitle, setNewTaskTitle] = useState("");
   const [newTaskPriority, setNewTaskPriority] = useState<Priority>("Sedang");
+  const [taskLoading, setTaskLoading] = useState(false);
 
+  // Chat state
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [chatInput, setChatInput] = useState("");
-  const [toast, setToast] = useState("");
 
+  // Toast
+  const [toast, setToast] = useState("");
   const notify = (msg: string) => {
     setToast(msg);
     window.setTimeout(() => setToast(""), 2800);
   };
 
-  // Check saved session on mount
+  // ─── Restore session on mount ───────────────────────────────────────────────
   useEffect(() => {
-    const savedUser = localStorage.getItem("velx_user");
-    if (savedUser) {
-      try {
-        const parsed = JSON.parse(savedUser);
-        setUser(parsed);
-        setView("workspace");
-      } catch {
-        localStorage.removeItem("velx_user");
-      }
-    }
-  }, []);
-
-  // Fetch real-time data from Supabase in background
-  useEffect(() => {
-    const client = getBrowserClient();
+    const client = getOptionalClient();
     if (!client) return;
 
-    async function loadInitialData() {
-      if (!client) return;
-      try {
-        const { data } = await client
-          .from("tasks")
-          .select("*")
-          .order("created_at", { ascending: true });
+    // Check existing session
+    client.auth.getSession().then(({ data: sessionData }) => {
+      if (sessionData.session?.user) {
+        setUser(sessionData.session.user);
+        setView("workspace");
+      }
+    });
 
+    // Listen to auth state changes (login / logout)
+    const { data: { subscription } } = client.auth.onAuthStateChange(
+      (_event: string, session: { user: User } | null) => {
+        if (session?.user) {
+          setUser(session.user);
+          setView("workspace");
+        } else {
+          setUser(null);
+          setView("landing");
+          setTasks([]);
+          setMessages([]);
+        }
+      }
+    );
+
+    return () => subscription.unsubscribe();
+  }, []);
+
+  // ─── Load user's tasks from Supabase (no realtime) ──────────────────────────
+  useEffect(() => {
+    if (!user) return;
+    const client = getOptionalClient();
+    if (!client) return;
+
+    setTaskLoading(true);
+
+    type TaskRow = { id: string | number; title: string; status: string; priority: string; created_at: string };
+    type MsgRow = { id: string | number; role: string; content: string; time: string; created_at: string };
+
+    client
+      .from("tasks")
+      .select("id, title, status, priority, created_at")
+      .order("created_at", { ascending: true })
+      .then(({ data }: { data: TaskRow[] | null }) => {
         if (data && data.length > 0) {
           setTasks(
             data.map((t) => ({
               id: String(t.id),
               title: t.title,
               completed: t.status === "Done",
-              priority: (t.priority === "High" ? "Tinggi" : t.priority === "Low" ? "Rendah" : "Sedang") as Priority,
+              priority: toPriority(t.priority),
               created_at: t.created_at,
             }))
           );
         } else {
-          setTasks([
-            { id: "1", title: "Rancang ide proyek pertama saya", completed: true, priority: "Tinggi" },
-            { id: "2", title: "Tentukan fitur utama yang ingin dibangun", completed: false, priority: "Tinggi" },
-            { id: "3", title: "Diskusikan roadmap dengan VELX AI", completed: false, priority: "Sedang" },
-          ]);
+          setTasks([]);
         }
-      } catch {
-        setTasks([
-          { id: "1", title: "Rancang ide proyek pertama saya", completed: true, priority: "Tinggi" },
-          { id: "2", title: "Tentukan fitur utama yang ingin dibangun", completed: false, priority: "Tinggi" },
-        ]);
-      }
+      })
+      .catch((err: Error) => console.error("Failed to load tasks:", err))
+      .finally(() => setTaskLoading(false));
 
-      try {
-        const { data } = await client
-          .from("ai_messages")
-          .select("*")
-          .order("created_at", { ascending: true });
-
+    // Load AI messages
+    client
+      .from("ai_messages")
+      .select("id, role, content, time, created_at")
+      .order("created_at", { ascending: true })
+      .then(({ data }: { data: MsgRow[] | null }) => {
         if (data && data.length > 0) {
           setMessages(
             data.map((m) => ({
@@ -123,71 +151,21 @@ export default function Home() {
         } else {
           setMessages([
             {
-              id: "msg-1",
+              id: "welcome",
               role: "assistant",
-              content: "Halo! Saya asisten VELX AI. Tanyakan apa saja tentang proyek Anda, dan saya siap membantu.",
-              time: "10:00",
+              content: `Halo! Saya VELX AI. Tugas apa yang sedang Anda kerjakan hari ini?`,
+              time: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
             },
           ]);
         }
-      } catch {
-        setMessages([
-          {
-            id: "msg-1",
-            role: "assistant",
-            content: "Halo! Saya asisten VELX AI. Tanyakan apa saja tentang proyek Anda, dan saya siap membantu.",
-            time: "10:00",
-          },
-        ]);
-      }
-    }
-
-    loadInitialData();
-
-    // Silent Realtime Subscription
-    const channel = client
-      .channel("velx_simple_sync")
-      .on("postgres_changes", { event: "*", schema: "public", table: "tasks" }, (payload) => {
-        if (payload.eventType === "INSERT") {
-          const row = payload.new as Record<string, unknown>;
-          const incoming: Task = {
-            id: String(row.id),
-            title: (row.title as string) || "Tugas Baru",
-            completed: row.status === "Done",
-            priority: (row.priority === "High" ? "Tinggi" : row.priority === "Low" ? "Rendah" : "Sedang") as Priority,
-            created_at: row.created_at as string,
-          };
-          setTasks((prev) => (prev.some((t) => t.id === incoming.id) ? prev : [...prev, incoming]));
-        } else if (payload.eventType === "UPDATE") {
-          const row = payload.new as Record<string, unknown>;
-          setTasks((prev) =>
-            prev.map((t) =>
-              t.id === String(row.id)
-                ? {
-                    ...t,
-                    title: (row.title as string) || t.title,
-                    completed: row.status === "Done",
-                  }
-                : t
-            )
-          );
-        } else if (payload.eventType === "DELETE") {
-          const row = payload.old as Record<string, unknown>;
-          setTasks((prev) => prev.filter((t) => t.id !== String(row.id)));
-        }
       })
-      .subscribe();
+      .catch(console.error);
+  }, [user]);
 
-    return () => {
-      client.removeChannel(channel);
-    };
-  }, []);
-
-  // Handle Authentication (Login / Register)
+  // ─── Auth: Login / Register ──────────────────────────────────────────────────
   const handleAuthSubmit = async (e: FormEvent) => {
     e.preventDefault();
     setAuthError("");
-    setAuthSuccess("");
 
     const email = emailInput.trim();
     const password = passwordInput.trim();
@@ -196,203 +174,172 @@ export default function Home() {
       setAuthError("Email dan password wajib diisi.");
       return;
     }
-
     if (password.length < 6) {
-      setAuthError("Password minimal harus 6 karakter.");
+      setAuthError("Password minimal 6 karakter.");
       return;
     }
 
     setAuthLoading(true);
-    const client = getBrowserClient();
+    const client = getOptionalClient();
+
+    if (!client) {
+      setAuthError("Konfigurasi Supabase belum tersedia. Hubungi pengelola aplikasi.");
+      setAuthLoading(false);
+      return;
+    }
 
     try {
       if (authMode === "register") {
-        if (client) {
-          const { data, error } = await client.auth.signUp({ email, password });
-          if (error) {
-            // If rate limit or warning, still allow local session so user is never blocked
-            console.warn("Supabase auth warning:", error.message);
+        const { error } = await client.auth.signUp({ email, password });
+        if (error) {
+          // "User already registered" → redirect to login
+          if (error.message.toLowerCase().includes("already")) {
+            setAuthError("Email sudah terdaftar. Silakan masuk.");
+          } else {
+            setAuthError(error.message);
           }
-          const loggedInUser: AppUser = { email, id: data?.user?.id || `user-${Date.now()}` };
-          setUser(loggedInUser);
-          localStorage.setItem("velx_user", JSON.stringify(loggedInUser));
-          notify("Akun berhasil dibuat! Selamat datang.");
-          setView("workspace");
-        } else {
-          const loggedInUser: AppUser = { email, id: `user-${Date.now()}` };
-          setUser(loggedInUser);
-          localStorage.setItem("velx_user", JSON.stringify(loggedInUser));
-          notify("Akun berhasil dibuat! Selamat datang.");
-          setView("workspace");
+          return;
         }
+        notify("Akun berhasil dibuat! Selamat datang 🎉");
+        // onAuthStateChange will handle setView("workspace")
       } else {
-        // Login mode
-        if (client) {
-          const { data, error } = await client.auth.signInWithPassword({ email, password });
-          if (error) {
-            console.warn("Supabase signIn error, checking fallback:", error.message);
+        const { error } = await client.auth.signInWithPassword({ email, password });
+        if (error) {
+          if (error.message.toLowerCase().includes("invalid")) {
+            setAuthError("Email atau password salah.");
+          } else {
+            setAuthError(error.message);
           }
-          const loggedInUser: AppUser = { email, id: data?.user?.id || `user-${Date.now()}` };
-          setUser(loggedInUser);
-          localStorage.setItem("velx_user", JSON.stringify(loggedInUser));
-          notify("Berhasil masuk!");
-          setView("workspace");
-        } else {
-          const loggedInUser: AppUser = { email, id: `user-${Date.now()}` };
-          setUser(loggedInUser);
-          localStorage.setItem("velx_user", JSON.stringify(loggedInUser));
-          notify("Berhasil masuk!");
-          setView("workspace");
+          return;
         }
+        notify("Berhasil masuk! 👋");
       }
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : "Terjadi kesalahan saat masuk.";
-      setAuthError(msg);
+      setAuthError(err instanceof Error ? err.message : "Terjadi kesalahan.");
     } finally {
       setAuthLoading(false);
     }
   };
 
-  const handleLogout = () => {
-    setUser(null);
-    localStorage.removeItem("velx_user");
-    const client = getBrowserClient();
-    if (client) {
-      client.auth.signOut().catch(() => {});
-    }
-    setView("landing");
+  const handleLogout = async () => {
+    const client = getOptionalClient();
+    if (client) await client.auth.signOut();
     notify("Anda telah keluar.");
   };
 
-  // Task actions
+  // ─── Add Task ────────────────────────────────────────────────────────────────
   const handleAddTask = async (e: FormEvent) => {
     e.preventDefault();
-    if (!newTaskTitle.trim()) return;
+    if (!newTaskTitle.trim() || !user) return;
 
-    const tempId = `task-${Date.now()}`;
-    const newTask: Task = {
-      id: tempId,
-      title: newTaskTitle.trim(),
-      completed: false,
-      priority: newTaskPriority,
-      created_at: new Date().toISOString(),
-    };
-
-    setTasks((prev) => [...prev, newTask]);
-    setNewTaskTitle("");
-    notify("Tugas baru ditambahkan!");
-
-    // Save to Supabase
-    const client = getBrowserClient();
-    if (client) {
-      try {
-        const dbPriority = newTaskPriority === "Tinggi" ? "High" : newTaskPriority === "Rendah" ? "Low" : "Medium";
-        const { data } = await client
-          .from("tasks")
-          .insert({
-            project_id: "00000000-0000-0000-0000-000000000001",
-            title: newTask.title,
-            status: "To do",
-            priority: dbPriority,
-          })
-          .select()
-          .single();
-
-        if (data) {
-          setTasks((prev) => prev.map((t) => (t.id === tempId ? { ...t, id: String(data.id) } : t)));
-        }
-      } catch (err) {
-        console.error("Gagal simpan tugas:", err);
-      }
+    const client = getOptionalClient();
+    if (!client) {
+      notify("Tidak dapat terhubung ke database.");
+      return;
     }
+
+    const { data, error } = await client
+      .from("tasks")
+      .insert({
+        user_id: user.id,
+        title: newTaskTitle.trim(),
+        status: "To do",
+        priority: toDbPriority(newTaskPriority),
+        phase: "General",
+        description: "",
+      })
+      .select("id, title, status, priority, created_at")
+      .single();
+
+    if (error) {
+      notify("Gagal menyimpan tugas.");
+      console.error(error);
+      return;
+    }
+
+    setTasks((prev) => [
+      ...prev,
+      {
+        id: String(data.id),
+        title: data.title,
+        completed: false,
+        priority: newTaskPriority,
+        created_at: data.created_at,
+      },
+    ]);
+    setNewTaskTitle("");
+    notify("Tugas berhasil disimpan!");
   };
 
+  // ─── Toggle Task ─────────────────────────────────────────────────────────────
   const toggleTask = async (id: string) => {
-    const target = tasks.find((t) => t.id === id);
-    if (!target) return;
-    const newStatus = !target.completed;
+    const task = tasks.find((t) => t.id === id);
+    if (!task) return;
 
+    const newStatus = !task.completed;
     setTasks((prev) => prev.map((t) => (t.id === id ? { ...t, completed: newStatus } : t)));
 
-    const client = getBrowserClient();
+    const client = getOptionalClient();
     if (client) {
-      try {
-        await client
-          .from("tasks")
-          .update({ status: newStatus ? "Done" : "To do" })
-          .eq("id", id);
-      } catch (err) {
-        console.error("Gagal update tugas:", err);
-      }
+      await client
+        .from("tasks")
+        .update({ status: newStatus ? "Done" : "To do" })
+        .eq("id", id)
+        .catch(console.error);
     }
   };
 
+  // ─── Delete Task ─────────────────────────────────────────────────────────────
   const deleteTask = async (id: string) => {
     setTasks((prev) => prev.filter((t) => t.id !== id));
     notify("Tugas dihapus.");
 
-    const client = getBrowserClient();
+    const client = getOptionalClient();
     if (client) {
-      try {
-        await client.from("tasks").delete().eq("id", id);
-      } catch (err) {
-        console.error("Gagal hapus tugas:", err);
-      }
+      await client.from("tasks").delete().eq("id", id).catch(console.error);
     }
   };
 
-  // Chat action
+  // ─── Send Chat ───────────────────────────────────────────────────────────────
   const handleSendMessage = async (e: FormEvent) => {
     e.preventDefault();
     const text = chatInput.trim();
-    if (!text) return;
+    if (!text || !user) return;
 
     const timeStr = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-    const userMsg: ChatMessage = {
-      id: `usr-${Date.now()}`,
-      role: "user",
-      content: text,
-      time: timeStr,
-    };
+    const userMsg: ChatMessage = { id: `u-${Date.now()}`, role: "user", content: text, time: timeStr };
 
     setMessages((prev) => [...prev, userMsg]);
     setChatInput("");
 
-    // Contextual AI response
-    const uncompleted = tasks.filter((t) => !t.completed);
+    // Contextual reply
+    const pending = tasks.filter((t) => !t.completed);
     const aiText =
-      uncompleted.length > 0
-        ? `Saran saya, fokus selesaikan "${uncompleted[0].title}" terlebih dahulu (Prioritas: ${uncompleted[0].priority}). Jika ada kesulitan, beri tahu saya!`
-        : "Luar biasa! Semua tugas Anda saat ini telah selesai. Apakah Anda ingin membuat rencana atau tugas baru?";
+      pending.length > 0
+        ? `Fokus selesaikan "${pending[0].title}" (Prioritas: ${pending[0].priority}). Ada hal lain yang perlu saya bantu?`
+        : "Semua tugas Anda sudah selesai. Apakah ingin merencanakan tahap berikutnya?";
 
-    const aiMsg: ChatMessage = {
-      id: `ai-${Date.now()}`,
-      role: "assistant",
-      content: aiText,
-      time: timeStr,
-    };
+    const aiMsg: ChatMessage = { id: `a-${Date.now()}`, role: "assistant", content: aiText, time: timeStr };
 
-    setTimeout(() => {
-      setMessages((prev) => [...prev, aiMsg]);
-    }, 450);
+    setTimeout(() => setMessages((prev) => [...prev, aiMsg]), 400);
 
-    const client = getBrowserClient();
+    // Save to DB
+    const client = getOptionalClient();
     if (client) {
-      try {
-        await client.from("ai_messages").insert([
-          { project_id: "00000000-0000-0000-0000-000000000001", role: "user", content: text, time: timeStr },
-          { project_id: "00000000-0000-0000-0000-000000000001", role: "assistant", content: aiText, time: timeStr },
-        ]);
-      } catch (err) {
-        console.error("Gagal simpan obrolan:", err);
-      }
+      await client
+        .from("ai_messages")
+        .insert([
+          { user_id: user.id, role: "user", content: text, time: timeStr },
+          { user_id: user.id, role: "assistant", content: aiText, time: timeStr },
+        ])
+        .catch(console.error);
     }
   };
 
-  // Calculations
+  // ─── Derived metrics ─────────────────────────────────────────────────────────
   const totalTasks = tasks.length;
-  const completedTasks = tasks.filter((t) => t.completed).length;
-  const percent = totalTasks > 0 ? Math.round((completedTasks / totalTasks) * 100) : 0;
+  const completedCount = tasks.filter((t) => t.completed).length;
+  const percent = totalTasks > 0 ? Math.round((completedCount / totalTasks) * 100) : 0;
 
   const filteredTasks = useMemo(() => {
     if (taskFilter === "active") return tasks.filter((t) => !t.completed);
@@ -400,58 +347,42 @@ export default function Home() {
     return tasks;
   }, [tasks, taskFilter]);
 
-  // Display initial for avatar
-  const userInitial = user?.email ? user.email.charAt(0).toUpperCase() : "U";
-  const userDisplayName = user?.email ? user.email.split("@")[0] : "Pengguna";
+  const userDisplay = user?.email?.split("@")[0] ?? "Pengguna";
+  const userInitial = userDisplay.charAt(0).toUpperCase();
 
-  // -------------------------------------------------------------------------
-  // VIEW 1: TAMPILAN AWAL (LANDING HERO SIMPLE DENGAN TOMBOL "MULAI")
-  // -------------------------------------------------------------------------
+  // ═══════════════════════════════════════════════════════════════════════════
+  // VIEW 1 — LANDING
+  // ═══════════════════════════════════════════════════════════════════════════
   if (view === "landing") {
     return (
       <main className="app-container">
         <header className="simple-nav">
-          <div className="brand-logo" onClick={() => setView("landing")}>
+          <div className="brand-logo">
             <span>✦</span> VELX
           </div>
           <div className="nav-actions">
-            {user ? (
-              <button className="nav-tab-btn active" onClick={() => setView("workspace")}>
-                Buka Workspace ➔
-              </button>
-            ) : (
-              <button
-                className="nav-tab-btn active"
-                onClick={() => {
-                  setAuthMode("login");
-                  setView("auth");
-                }}
-              >
-                Masuk
-              </button>
-            )}
+            <button
+              className="nav-tab-btn active"
+              onClick={() => { setAuthMode("login"); setView("auth"); }}
+            >
+              Masuk
+            </button>
           </div>
         </header>
 
         <section className="landing-view">
-          <div className="landing-badge">✦ WORKSPACE PROYEK & AI SIMPLE ✦</div>
+          <div className="landing-badge">✦ MANAJEMEN PROYEK DENGAN AI</div>
           <h1 className="landing-title">
-            Kelola Proyek Lebih Rapi &amp; <span>Mudah</span>
+            Kelola Tugas Lebih Rapi &amp; <span>Efisien</span>
           </h1>
           <p className="landing-desc">
-            Satu tempat sederhana untuk mencatat tugas, memantau kemajuan, dan berdiskusi dengan asisten AI tanpa ribet.
+            Satu tempat sederhana untuk mencatat tugas Anda, memantau kemajuan,
+            dan berdiskusi dengan asisten AI — aman dan privat untuk setiap akun.
           </p>
 
           <button
             className="btn-start"
-            onClick={() => {
-              if (user) {
-                setView("workspace");
-              } else {
-                setAuthMode("login");
-                setView("auth");
-              }
-            }}
+            onClick={() => { setAuthMode("login"); setView("auth"); }}
           >
             Mulai Sekarang ➔
           </button>
@@ -460,17 +391,17 @@ export default function Home() {
             <div className="mini-card">
               <i>📋</i>
               <h4>Daftar Tugas Praktis</h4>
-              <p>Catat dan centang tugas harian Anda dengan antarmuka yang bersih dan mudah dipahami.</p>
+              <p>Catat dan tandai tugas selesai dengan tampilan yang bersih dan mudah.</p>
             </div>
             <div className="mini-card">
-              <i>⚡</i>
-              <h4>Simpan Otomatis</h4>
-              <p>Semua perubahan data Anda tersimpan aman secara otomatis setiap saat.</p>
+              <i>🔒</i>
+              <h4>Data Pribadi & Aman</h4>
+              <p>Setiap akun menyimpan datanya sendiri. Tidak ada pengguna lain yang bisa melihat tugas Anda.</p>
             </div>
             <div className="mini-card">
               <i>🤖</i>
               <h4>Asisten Pintar AI</h4>
-              <p>Dapatkan saran prioritas tugas dan ide pemecahan masalah langsung dari asisten AI.</p>
+              <p>Dapatkan saran prioritas tugas secara instan dari asisten AI berbasis konteks.</p>
             </div>
           </div>
         </section>
@@ -480,18 +411,18 @@ export default function Home() {
     );
   }
 
-  // -------------------------------------------------------------------------
-  // VIEW 2: TAMPILAN LOGIN & DAFTAR (EMAIL & PASSWORD BUATAN USER)
-  // -------------------------------------------------------------------------
+  // ═══════════════════════════════════════════════════════════════════════════
+  // VIEW 2 — AUTH (Login / Register)
+  // ═══════════════════════════════════════════════════════════════════════════
   if (view === "auth") {
     return (
       <main className="app-container">
         <header className="simple-nav">
-          <div className="brand-logo" onClick={() => setView("landing")}>
+          <div className="brand-logo" style={{ cursor: "pointer" }} onClick={() => setView("landing")}>
             <span>✦</span> VELX
           </div>
           <button className="nav-tab-btn" onClick={() => setView("landing")}>
-            ← Kembali ke Beranda
+            ← Kembali
           </button>
         </header>
 
@@ -509,29 +440,20 @@ export default function Home() {
               <button
                 type="button"
                 className={`auth-tab ${authMode === "login" ? "active" : ""}`}
-                onClick={() => {
-                  setAuthMode("login");
-                  setAuthError("");
-                  setAuthSuccess("");
-                }}
+                onClick={() => { setAuthMode("login"); setAuthError(""); }}
               >
                 Masuk
               </button>
               <button
                 type="button"
                 className={`auth-tab ${authMode === "register" ? "active" : ""}`}
-                onClick={() => {
-                  setAuthMode("register");
-                  setAuthError("");
-                  setAuthSuccess("");
-                }}
+                onClick={() => { setAuthMode("register"); setAuthError(""); }}
               >
                 Daftar Akun
               </button>
             </div>
 
             {authError && <div className="auth-alert error">{authError}</div>}
-            {authSuccess && <div className="auth-alert success">{authSuccess}</div>}
 
             <form className="auth-form" onSubmit={handleAuthSubmit}>
               <div className="form-group">
@@ -539,7 +461,7 @@ export default function Home() {
                 <input
                   type="email"
                   className="form-input"
-                  placeholder="contoh: nama@email.com"
+                  placeholder="nama@email.com"
                   required
                   autoFocus
                   value={emailInput}
@@ -560,20 +482,21 @@ export default function Home() {
               </div>
 
               <button type="submit" className="btn-auth-submit" disabled={authLoading}>
-                {authLoading ? "Memproses..." : authMode === "login" ? "Masuk Sekarang ➔" : "Daftar Akun Baru ➔"}
+                {authLoading
+                  ? "Memproses..."
+                  : authMode === "login"
+                  ? "Masuk ➔"
+                  : "Daftar Sekarang ➔"}
               </button>
 
               <button
                 type="button"
                 className="btn-back-link"
-                onClick={() => {
-                  setAuthMode(authMode === "login" ? "register" : "login");
-                  setAuthError("");
-                }}
+                onClick={() => { setAuthMode(authMode === "login" ? "register" : "login"); setAuthError(""); }}
               >
                 {authMode === "login"
-                  ? "Belum punya akun? Klik di sini untuk mendaftar"
-                  : "Sudah punya akun? Klik di sini untuk masuk"}
+                  ? "Belum punya akun? Daftar di sini"
+                  : "Sudah punya akun? Masuk di sini"}
               </button>
             </form>
           </div>
@@ -584,24 +507,23 @@ export default function Home() {
     );
   }
 
-  // -------------------------------------------------------------------------
-  // VIEW 3: TAMPILAN UTAMA WORKSPACE (SEDERHANA, BERSIH, NYAMAN)
-  // -------------------------------------------------------------------------
+  // ═══════════════════════════════════════════════════════════════════════════
+  // VIEW 3 — WORKSPACE
+  // ═══════════════════════════════════════════════════════════════════════════
   return (
     <main className="app-container">
-      {/* Top Navbar */}
+      {/* Navbar */}
       <header className="simple-nav">
-        <div className="brand-logo" onClick={() => setView("landing")}>
+        <div className="brand-logo">
           <span>✦</span> VELX
         </div>
 
-        {/* View Switcher Tabs */}
         <div style={{ display: "flex", gap: "8px" }}>
           <button
             className={`nav-tab-btn ${activeTab === "tasks" ? "active" : ""}`}
             onClick={() => setActiveTab("tasks")}
           >
-            📋 Tugas Saya ({tasks.length})
+            📋 Tugas ({totalTasks})
           </button>
           <button
             className={`nav-tab-btn ${activeTab === "ai" ? "active" : ""}`}
@@ -611,38 +533,38 @@ export default function Home() {
           </button>
         </div>
 
-        {/* User Info & Logout */}
         <div className="nav-actions">
-          <div className="user-pill" title={user?.email || "Pengguna"}>
+          <div className="user-pill">
             <span className="user-avatar">{userInitial}</span>
-            <span>{userDisplayName}</span>
+            <span>{userDisplay}</span>
           </div>
-          <button className="btn-logout" onClick={handleLogout} title="Keluar">
+          <button className="btn-logout" onClick={handleLogout}>
             Keluar
           </button>
         </div>
       </header>
 
-      {/* Main Container */}
+      {/* Content */}
       <div className="workspace-content">
-        {/* Tab 1: Tugas Saya */}
+
+        {/* ── Tab 1: Tugas ── */}
         {activeTab === "tasks" && (
           <div>
-            {/* Progress Card */}
+            {/* Progress Bar */}
             <div className="progress-card">
               <div className="progress-header">
-                <h3>Kemajuan Proyek</h3>
+                <h3>Kemajuan Anda</h3>
                 <span>{percent}% Selesai</span>
               </div>
               <div className="progress-track">
                 <div className="progress-fill" style={{ width: `${percent}%` }} />
               </div>
               <div className="progress-sub">
-                {completedTasks} dari {totalTasks} tugas telah diselesaikan.
+                {completedCount} dari {totalTasks} tugas telah diselesaikan.
               </div>
             </div>
 
-            {/* Form Tambah Tugas Cepat */}
+            {/* Add Task Form */}
             <form className="task-form" onSubmit={handleAddTask}>
               <input
                 className="task-input"
@@ -655,42 +577,37 @@ export default function Home() {
                 value={newTaskPriority}
                 onChange={(e) => setNewTaskPriority(e.target.value as Priority)}
               >
-                <option value="Tinggi">Prioritas Tinggi</option>
-                <option value="Sedang">Prioritas Sedang</option>
-                <option value="Rendah">Prioritas Rendah</option>
+                <option value="Tinggi">Tinggi</option>
+                <option value="Sedang">Sedang</option>
+                <option value="Rendah">Rendah</option>
               </select>
               <button type="submit" className="btn-add-task">
                 + Tambah
               </button>
             </form>
 
-            {/* Filter Row */}
+            {/* Filters */}
             <div className="filter-row">
-              <button
-                className={`filter-btn ${taskFilter === "all" ? "active" : ""}`}
-                onClick={() => setTaskFilter("all")}
-              >
-                Semua ({totalTasks})
-              </button>
-              <button
-                className={`filter-btn ${taskFilter === "active" ? "active" : ""}`}
-                onClick={() => setTaskFilter("active")}
-              >
-                Sedang Dikerjakan ({totalTasks - completedTasks})
-              </button>
-              <button
-                className={`filter-btn ${taskFilter === "completed" ? "active" : ""}`}
-                onClick={() => setTaskFilter("completed")}
-              >
-                Selesai ({completedTasks})
-              </button>
+              {(["all", "active", "completed"] as const).map((f) => (
+                <button
+                  key={f}
+                  className={`filter-btn ${taskFilter === f ? "active" : ""}`}
+                  onClick={() => setTaskFilter(f)}
+                >
+                  {f === "all" ? `Semua (${totalTasks})` : f === "active" ? `Dikerjakan (${totalTasks - completedCount})` : `Selesai (${completedCount})`}
+                </button>
+              ))}
             </div>
 
             {/* Task List */}
             <div className="task-list">
-              {filteredTasks.length === 0 ? (
+              {taskLoading ? (
+                <div className="empty-task-state">Memuat tugas Anda...</div>
+              ) : filteredTasks.length === 0 ? (
                 <div className="empty-task-state">
-                  Belum ada tugas di kategori ini. Tambahkan tugas baru di atas!
+                  {taskFilter === "all"
+                    ? "Belum ada tugas. Tambahkan tugas baru di atas!"
+                    : "Tidak ada tugas di kategori ini."}
                 </div>
               ) : (
                 filteredTasks.map((task) => (
@@ -699,29 +616,16 @@ export default function Home() {
                       type="button"
                       className={`task-check-circle ${task.completed ? "checked" : ""}`}
                       onClick={() => toggleTask(task.id)}
-                      title={task.completed ? "Tandai belum selesai" : "Tandai selesai"}
                     >
                       {task.completed ? "✓" : ""}
                     </button>
-
                     <span className={`task-text ${task.completed ? "strikethrough" : ""}`}>
                       {task.title}
                     </span>
-
-                    <span
-                      className={`priority-tag ${
-                        task.priority === "Tinggi" ? "high" : task.priority === "Rendah" ? "low" : "medium"
-                      }`}
-                    >
+                    <span className={`priority-tag ${task.priority === "Tinggi" ? "high" : task.priority === "Rendah" ? "low" : "medium"}`}>
                       {task.priority}
                     </span>
-
-                    <button
-                      type="button"
-                      className="btn-delete-task"
-                      onClick={() => deleteTask(task.id)}
-                      title="Hapus tugas"
-                    >
+                    <button type="button" className="btn-delete-task" onClick={() => deleteTask(task.id)}>
                       ✕
                     </button>
                   </div>
@@ -731,18 +635,18 @@ export default function Home() {
           </div>
         )}
 
-        {/* Tab 2: Obrolan Asisten AI */}
+        {/* ── Tab 2: AI Chat ── */}
         {activeTab === "ai" && (
           <div className="chat-box">
             <div className="chat-header">
               <h3>💬 Asisten VELX AI</h3>
-              <span>● Online &amp; Siap Membantu</span>
+              <span>● Siap Membantu</span>
             </div>
 
             <div className="chat-messages">
               {messages.map((m) => (
                 <div key={m.id} className={`chat-bubble ${m.role}`}>
-                  <div>{m.content}</div>
+                  {m.content}
                   <span className="chat-bubble-time">{m.time}</span>
                 </div>
               ))}
@@ -751,16 +655,15 @@ export default function Home() {
             <form className="chat-form" onSubmit={handleSendMessage}>
               <input
                 className="chat-input"
-                placeholder="Tanyakan saran tugas atau ide penyelesaian proyek..."
+                placeholder="Tanya saran prioritas atau kendala proyek..."
                 value={chatInput}
                 onChange={(e) => setChatInput(e.target.value)}
               />
-              <button type="submit" className="btn-send-chat">
-                Kirim ➤
-              </button>
+              <button type="submit" className="btn-send-chat">➤</button>
             </form>
           </div>
         )}
+
       </div>
 
       {toast && <div className="toast-msg">✓ {toast}</div>}
