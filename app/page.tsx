@@ -168,7 +168,7 @@ export default function Home() {
     setAuthError("");
 
     const email = emailInput.trim();
-    const password = passwordInput.trim();
+    const password = passwordInput;
 
     if (!email || !password) {
       setAuthError("Email dan password wajib diisi.");
@@ -190,9 +190,8 @@ export default function Home() {
 
     try {
       if (authMode === "register") {
-        const { error } = await client.auth.signUp({ email, password });
+        const { data, error } = await client.auth.signUp({ email, password });
         if (error) {
-          // "User already registered" → redirect to login
           if (error.message.toLowerCase().includes("already")) {
             setAuthError("Email sudah terdaftar. Silakan masuk.");
           } else {
@@ -200,8 +199,15 @@ export default function Home() {
           }
           return;
         }
+
+        if (!data.session) {
+          setPasswordInput("");
+          setAuthMode("login");
+          notify("Akun dibuat. Periksa email untuk verifikasi sebelum masuk.");
+          return;
+        }
+
         notify("Akun berhasil dibuat! Selamat datang 🎉");
-        // onAuthStateChange will handle setView("workspace")
       } else {
         const { error } = await client.auth.signInWithPassword({ email, password });
         if (error) {
