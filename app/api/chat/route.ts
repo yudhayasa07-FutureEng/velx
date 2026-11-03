@@ -1,7 +1,6 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 
-export const runtime = "nodejs";
 export const maxDuration = 30;
 
 type ChatTurn = { role: "user" | "assistant"; content: string };
