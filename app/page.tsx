@@ -14,11 +14,22 @@ type Task = {
   created_at?: string;
 };
 
+type AgentAction = {
+  type: "create_task";
+  title: string;
+  description: string;
+  priority: Priority;
+  phase: string;
+  status?: "pending" | "approved" | "rejected";
+  result?: string;
+};
+
 type ChatMessage = {
   id: string;
   role: "user" | "assistant";
   content: string;
   time: string;
+  actions?: AgentAction[];
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -307,7 +318,44 @@ export default function Home() {
     }
   };
 
-  // ─── Send Chat: real VELX AI via the protected server route ───────────────────
+  // ─── Supervised Agent: propose first, execute only after approval ─────────────
+  const approveAgentAction = async (messageId: string, actionIndex: number, action: AgentAction) => {
+    if (!user || action.status !== "pending") return;
+    try {
+      const response = await fetch("/api/agent/execute", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: { type: action.type, title: action.title, description: action.description, priority: action.priority, phase: action.phase } }),
+      });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.error || "Tindakan gagal dijalankan.");
+      setMessages((prev) => prev.map((message) => message.id !== messageId ? message : {
+        ...message,
+        actions: message.actions?.map((item, index) => index === actionIndex
+          ? { ...item, status: "approved", result: "Tugas berhasil disimpan." }
+          : item),
+      }));
+      if (payload.task) setTasks((prev) => [...prev, {
+        id: String(payload.task.id),
+        title: payload.task.title,
+        completed: false,
+        priority: toPriority(payload.task.priority),
+        created_at: payload.task.created_at,
+      }]);
+      notify("Tindakan disetujui dan berhasil dijalankan.");
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "Gagal menjalankan tindakan.");
+    }
+  };
+
+  const rejectAgentAction = (messageId: string, actionIndex: number) => {
+    setMessages((prev) => prev.map((message) => message.id !== messageId ? message : {
+      ...message,
+      actions: message.actions?.map((item, index) => index === actionIndex ? { ...item, status: "rejected" } : item),
+    }));
+  };
+
+  // ─── Send Chat ───────────────────────────────────────────────────────────────
   const handleSendMessage = async (e: FormEvent) => {
     e.preventDefault();
     const text = chatInput.trim();
@@ -331,28 +379,24 @@ export default function Home() {
           tasks: tasks.map(({ title, completed, priority }) => ({ title, completed, priority })),
         }),
       });
-
       const payload = await response.json();
-      if (!response.ok) {
-        throw new Error(payload.error || "VELX AI belum dapat menjawab. Coba lagi.");
-      }
-
-      const aiText = String(payload.reply || "").trim();
-      if (!aiText) throw new Error("AI mengirim jawaban kosong. Coba ulangi.");
+      if (!response.ok) throw new Error(payload.error || "VELX AI belum dapat menjawab.");
 
       const aiMsg: ChatMessage = {
         id: `a-${Date.now()}`,
         role: "assistant",
-        content: aiText,
+        content: String(payload.reply || "").trim(),
+        actions: Array.isArray(payload.actions) ? payload.actions.map((action: AgentAction) => ({ ...action, status: "pending" })) : [],
         time: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
       };
+      if (!aiMsg.content) throw new Error("AI mengirim jawaban kosong.");
       setMessages((prev) => [...prev, aiMsg]);
 
       const client = getOptionalClient();
       if (client) {
         const { error } = await client.from("ai_messages").insert([
           { user_id: user.id, role: "user", content: text, time: timeStr },
-          { user_id: user.id, role: "assistant", content: aiText, time: aiMsg.time },
+          { user_id: user.id, role: "assistant", content: aiMsg.content, time: aiMsg.time },
         ]);
         if (error) console.error("Gagal menyimpan riwayat AI:", error);
       }
@@ -361,7 +405,7 @@ export default function Home() {
       setMessages((prev) => [...prev, {
         id: `err-${Date.now()}`,
         role: "assistant",
-        content: `Maaf, saya belum bisa memproses permintaan itu. ${errorText}`,
+        content: `VELX belum dapat memproses permintaan itu. ${errorText}`,
         time: timeStr,
       }]);
     } finally {
@@ -678,9 +722,29 @@ export default function Home() {
 
             <div className="chat-messages">
               {messages.map((m) => (
-                <div key={m.id} className={`chat-bubble ${m.role}`}>
-                  {m.content}
-                  <span className="chat-bubble-time">{m.time}</span>
+                <div key={m.id}>
+                  <div className={`chat-bubble ${m.role}`}>
+                    {m.content}
+                    <span className="chat-bubble-time">{m.time}</span>
+                  </div>
+                  {m.actions?.map((action, index) => (
+                    <div key={`${m.id}-action-${index}`} style={{ margin: "10px 0 14px 18px", padding: 14, border: "1px solid #2b8db5", borderRadius: 12, background: "rgba(22, 163, 205, 0.07)", maxWidth: 620 }}>
+                      <div style={{ fontSize: 11, letterSpacing: 1, color: "#38bdf8", fontWeight: 700 }}>USULAN TINDAKAN • MEMERLUKAN PERSETUJUAN</div>
+                      <strong style={{ display: "block", margin: "8px 0 4px" }}>{action.title}</strong>
+                      <div style={{ fontSize: 13, opacity: 0.8 }}>{action.description || "VELX mengusulkan tugas ini untuk proyek."}</div>
+                      <div style={{ fontSize: 12, opacity: 0.7, marginTop: 8 }}>Fase: {action.phase} · Prioritas: {action.priority}</div>
+                      {action.status === "pending" ? (
+                        <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
+                          <button type="button" className="btn-send-chat" style={{ padding: "8px 14px", width: "auto", height: "auto" }} onClick={() => approveAgentAction(m.id, index, action)}>Setujui & Jalankan</button>
+                          <button type="button" className="filter-btn" onClick={() => rejectAgentAction(m.id, index)}>Tolak</button>
+                        </div>
+                      ) : (
+                        <div style={{ marginTop: 10, fontSize: 12, color: action.status === "approved" ? "#34d399" : "#fbbf24" }}>
+                          {action.status === "approved" ? "✓ " + (action.result || "Disetujui") : "Usulan ditolak"}
+                        </div>
+                      )}
+                    </div>
+                  ))}
                 </div>
               ))}
             </div>
