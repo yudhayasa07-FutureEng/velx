@@ -61,6 +61,7 @@ export default function Home() {
   // Chat state
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [chatInput, setChatInput] = useState("");
+  const [aiLoading, setAiLoading] = useState(false);
 
   // Toast
   const [toast, setToast] = useState("");
@@ -306,39 +307,65 @@ export default function Home() {
     }
   };
 
-  // ─── Send Chat ───────────────────────────────────────────────────────────────
+  // ─── Send Chat: real VELX AI via the protected server route ───────────────────
   const handleSendMessage = async (e: FormEvent) => {
     e.preventDefault();
     const text = chatInput.trim();
-    if (!text || !user) return;
+    if (!text || !user || aiLoading) return;
 
     const timeStr = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
     const userMsg: ChatMessage = { id: `u-${Date.now()}`, role: "user", content: text, time: timeStr };
+    const history = [...messages, userMsg].slice(-12);
 
-    setMessages((prev) => [...prev, userMsg]);
+    setMessages(history);
     setChatInput("");
+    setAiLoading(true);
 
-    // Contextual reply
-    const pending = tasks.filter((t) => !t.completed);
-    const aiText =
-      pending.length > 0
-        ? `Fokus selesaikan "${pending[0].title}" (Prioritas: ${pending[0].priority}). Ada hal lain yang perlu saya bantu?`
-        : "Semua tugas Anda sudah selesai. Apakah ingin merencanakan tahap berikutnya?";
+    try {
+      const response = await fetch("/api/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          message: text,
+          history: history.map(({ role, content }) => ({ role, content })),
+          tasks: tasks.map(({ title, completed, priority }) => ({ title, completed, priority })),
+        }),
+      });
 
-    const aiMsg: ChatMessage = { id: `a-${Date.now()}`, role: "assistant", content: aiText, time: timeStr };
+      const payload = await response.json();
+      if (!response.ok) {
+        throw new Error(payload.error || "VELX AI belum dapat menjawab. Coba lagi.");
+      }
 
-    setTimeout(() => setMessages((prev) => [...prev, aiMsg]), 400);
+      const aiText = String(payload.reply || "").trim();
+      if (!aiText) throw new Error("AI mengirim jawaban kosong. Coba ulangi.");
 
-    // Save to DB
-    const client = getOptionalClient();
-    if (client) {
-      await client
-        .from("ai_messages")
-        .insert([
+      const aiMsg: ChatMessage = {
+        id: `a-${Date.now()}`,
+        role: "assistant",
+        content: aiText,
+        time: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+      };
+      setMessages((prev) => [...prev, aiMsg]);
+
+      const client = getOptionalClient();
+      if (client) {
+        const { error } = await client.from("ai_messages").insert([
           { user_id: user.id, role: "user", content: text, time: timeStr },
-          { user_id: user.id, role: "assistant", content: aiText, time: timeStr },
-        ])
-        .catch(console.error);
+          { user_id: user.id, role: "assistant", content: aiText, time: aiMsg.time },
+        ]);
+        if (error) console.error("Gagal menyimpan riwayat AI:", error);
+      }
+    } catch (err: unknown) {
+      const errorText = err instanceof Error ? err.message : "Terjadi kesalahan saat menghubungi AI.";
+      setMessages((prev) => [...prev, {
+        id: `err-${Date.now()}`,
+        role: "assistant",
+        content: `Maaf, saya belum bisa memproses permintaan itu. ${errorText}`,
+        time: timeStr,
+      }]);
+    } finally {
+      setAiLoading(false);
     }
   };
 
@@ -658,14 +685,24 @@ export default function Home() {
               ))}
             </div>
 
+            {aiLoading && <div className="chat-bubble assistant">VELX sedang menganalisis masalah dan menyusun solusi…</div>}
+            <div className="filter-row" style={{ margin: "12px 0" }}>
+              {["Bantu pecahkan masalah saya", "Susun prioritas tugas", "Buat rencana langkah demi langkah"].map((prompt) => (
+                <button key={prompt} type="button" className="filter-btn" disabled={aiLoading}
+                  onClick={() => setChatInput(prompt)}>{prompt}</button>
+              ))}
+            </div>
             <form className="chat-form" onSubmit={handleSendMessage}>
               <input
                 className="chat-input"
-                placeholder="Tanya saran prioritas atau kendala proyek..."
+                placeholder="Ceritakan masalah, target, atau kendala proyek..."
                 value={chatInput}
+                disabled={aiLoading}
                 onChange={(e) => setChatInput(e.target.value)}
               />
-              <button type="submit" className="btn-send-chat">➤</button>
+              <button type="submit" className="btn-send-chat" disabled={aiLoading || !chatInput.trim()}>
+                {aiLoading ? "…" : "➤"}
+              </button>
             </form>
           </div>
         )}
