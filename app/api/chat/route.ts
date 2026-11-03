@@ -9,6 +9,16 @@ type TaskContext = { title: string; completed: boolean; priority: string };
 const SYSTEM_PROMPT = `Kamu adalah VELX AI, asisten perencana dan pemecah masalah proyek yang analitis, interaktif, dan berorientasi eksekusi.
 Tujuanmu bukan sekadar mengobrol: bantu pengguna mengubah masalah yang kabur menjadi keputusan dan tindakan yang realistis.
 
+ARSITEKTUR OTONOMI: SUPERVISED AGENT.
+- Kamu boleh menganalisis, berpikir, menyusun strategi, dan menyiapkan usulan secara mandiri.
+- Kamu TIDAK BOLEH mengklaim tindakan sudah dijalankan.
+- Perubahan database hanya boleh dilakukan melalui action terstruktur yang ditampilkan sebagai usulan dan menunggu persetujuan eksplisit pengguna.
+- Jangan mengusulkan tindakan hanya demi terlihat aktif. Usulkan create_task hanya jika pengguna meminta rencana/tindak lanjut atau tugas konkret memang merupakan langkah berikutnya.
+- Maksimal 5 usulan tugas dalam satu jawaban. Setiap tugas harus spesifik, dapat dikerjakan, dan tidak duplikat dari tugas aktif.
+- Jika hanya menjawab pertanyaan umum atau meminta analisis, kembalikan actions sebagai array kosong.
+- Output wajib JSON valid dengan bentuk: {"reply":"jawaban untuk pengguna","actions":[{"type":"create_task","title":"judul tugas","description":"hasil yang diharapkan","priority":"Tinggi|Sedang|Rendah","phase":"fase proyek"}]}. Jangan menambahkan markdown fence atau teks di luar JSON.
+- Actions hanyalah proposal. Pengguna harus menekan tombol persetujuan sebelum server mengeksekusinya.
+
 Cara kerja:
 1. Pahami tujuan, kondisi saat ini, batasan, sumber daya, tenggat, dan hasil yang diinginkan.
 2. Jika informasi penting belum ada, ajukan SATU pertanyaan klarifikasi paling menentukan. Jangan menebak fakta.
@@ -80,12 +90,13 @@ export async function POST(request: Request) {
       },
       body: JSON.stringify({
         model: process.env.VELX_AI_MODEL || "openai/gpt-5-mini",
+        response_format: { type: "json_object" },
         messages: [
           { role: "system", content: SYSTEM_PROMPT },
           { role: "system", content: `Konteks tugas pengguna saat ini:\n${taskSummary}` },
           ...history,
         ],
-        max_tokens: 1400,
+        max_tokens: 1800,
       }),
       signal: AbortSignal.timeout(25000),
     });
@@ -101,12 +112,33 @@ export async function POST(request: Request) {
     }
 
     const result = await gatewayResponse.json();
-    const reply = result?.choices?.[0]?.message?.content;
-    if (typeof reply !== "string" || !reply.trim()) {
+    const raw = result?.choices?.[0]?.message?.content;
+    if (typeof raw !== "string" || !raw.trim()) {
       return NextResponse.json({ error: "AI tidak menghasilkan jawaban yang dapat dibaca." }, { status: 502 });
     }
 
-    return NextResponse.json({ reply: reply.trim() }, {
+    let parsed: { reply?: unknown; actions?: unknown };
+    try { parsed = JSON.parse(raw); }
+    catch { return NextResponse.json({ error: "Format jawaban AI tidak valid. Silakan coba lagi." }, { status: 502 }); }
+
+    const reply = typeof parsed.reply === "string" ? parsed.reply.trim() : "";
+    const actions = Array.isArray(parsed.actions) ? parsed.actions.slice(0, 5).flatMap((item) => {
+      if (!item || typeof item !== "object") return [];
+      const action = item as Record<string, unknown>;
+      const title = typeof action.title === "string" ? action.title.trim().slice(0, 180) : "";
+      if (action.type !== "create_task" || !title) return [];
+      const priority = ["Tinggi", "Sedang", "Rendah"].includes(String(action.priority)) ? String(action.priority) : "Sedang";
+      return [{
+        type: "create_task",
+        title,
+        description: typeof action.description === "string" ? action.description.slice(0, 1000) : "",
+        priority,
+        phase: typeof action.phase === "string" ? action.phase.slice(0, 80) : "General",
+      }];
+    }) : [];
+
+    if (!reply) return NextResponse.json({ error: "AI tidak menghasilkan jawaban yang dapat dibaca." }, { status: 502 });
+    return NextResponse.json({ reply, actions }, {
       headers: { "Cache-Control": "no-store" },
     });
   } catch (error) {
