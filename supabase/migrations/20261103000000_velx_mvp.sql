@@ -21,7 +21,7 @@ create table if not exists public.tasks (
   phase text not null default 'General',
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
-);
+)
 
 create table if not exists public.ai_messages (
   id uuid primary key default gen_random_uuid(),
@@ -87,10 +87,10 @@ on conflict (id) do nothing;
 insert into public.tasks (id, project_id, title, description, status, priority, phase)
 values
   ('11111111-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000001', 'Tentukan Cakupan Proyek VELX', 'Konfirmasi target pengguna, hasil akhir, dan batasan rilis pertama.', 'Done', 'High', 'Planning'),
-  ('11111111-0000-0000-0000-000000000002', '00000000-0000-0000-0000-000000000002', 'Desain Core Workspace Real-Time', 'Bangun dashboard utama, kontrol tugas live, dan sinkronisasi real-time.', 'In progress', 'High', 'Design'),
-  ('11111111-0000-0000-0000-000000000003', '00000000-0000-0000-0000-000000000003', 'Integrasi Supabase & Realtime Publication', 'Siapkan tabel PostgreSQL, publication supabase_realtime, dan WebSocket channel.', 'Review', 'High', 'Build'),
-  ('11111111-0000-0000-0000-000000000004', '00000000-0000-0000-0000-000000000004', 'Bangun AI Context Memory Assistant', 'Menjawab pertanyaan berbasis konteks proyek dan memecah blocker pekerjaan.', 'To do', 'High', 'Build'),
-  ('11111111-0000-0000-0000-000000000005', '00000000-0000-0000-0000-000000000005', 'Deploy ke Vercel & Publikasi Portofolio', 'Konfigurasi environment variables, verifikasi build, dan publish ke publik.', 'To do', 'Medium', 'Launch')
+  ('11111111-0000-0000-0000-000000000002', '00000000-0000-0000-0000-000000000001', 'Desain Core Workspace Real-Time', 'Bangun dashboard utama, kontrol tugas live, dan sinkronisasi real-time.', 'In progress', 'High', 'Design'),
+  ('11111111-0000-0000-0000-000000000003', '00000000-0000-0000-0000-000000000001', 'Integrasi Supabase & Realtime Publication', 'Siapkan tabel PostgreSQL, publication supabase_realtime, dan WebSocket channel.', 'Review', 'High', 'Build'),
+  ('11111111-0000-0000-0000-000000000004', '00000000-0000-0000-0000-000000000001', 'Bangun AI Context Memory Assistant', 'Menjawab pertanyaan berbasis konteks proyek dan memecah blocker pekerjaan.', 'To do', 'High', 'Build'),
+  ('11111111-0000-0000-0000-000000000005', '00000000-0000-0000-0000-000000000001', 'Deploy ke Vercel & Publikasi Portofolio', 'Konfigurasi environment variables, verifikasi build, dan publish ke publik.', 'To do', 'Medium', 'Launch')
 on conflict (id) do nothing;
 
 insert into public.ai_messages (id, project_id, role, content, time)
